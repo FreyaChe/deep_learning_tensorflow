@@ -402,11 +402,11 @@ for word, pron_list in cmu.items():
 # trim the phenomes
 def phoneme_seq_to_inv_key(phenomes):
     if isinstance(phenomes, np.ndarray):
-        phonemes = phenomes.tolist()
+        phenomes = phenomes.tolist()
     
     if "<end>" in phenomes: # delete idx after the first <end>
         idx = phenomes.index("<end>")
-        phonemes = phenomes[:idx]
+        phenomes = phenomes[:idx]
     
     key = " ".join(phenomes)
     return key
@@ -492,7 +492,6 @@ def prediction_to_sentence(preds, vocab, inv):
 
     all_best_sentences = []
     for i, candidates_list in enumerate(all_candidates):
-        lens = [len(c) for c in candidates_list]
 
         best_sentence = get_best_sentence_beam_search(candidates_list, model, beam_width=20)
         all_best_sentences.append(best_sentence.lower()) # conver to lower letter 
@@ -504,7 +503,7 @@ output = []
 for batch, (inp, targ) in enumerate(pred_step):
     final_preds = pred_step(inp, batch_size)
     best_sentence = prediction_to_sentence(final_preds, vocab, inv)
-    output.extend(batch_sentences)
+    output.extend(best_sentence)
  
 
 # save to csv file
