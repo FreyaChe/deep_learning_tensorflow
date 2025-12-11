@@ -421,28 +421,34 @@ def sentence_to_words_candidates(sentence, inv):
     return candidates_list
 
 
+def pheno_check(pheno):
+    candidates = []
+    for wp in pheno:
+        if wp.upper() in model:
+            candidates.append(wp.upper())
+        elif wp in model:
+            candidates.append(wp)
+    return candidates
+
+
 # get the best sentence candidate
-def get_best_sentence_beam_search(candidates_list, model, beam_width=10):
+def get_best_sentence_beam_search(candidates_list, model, beam_width=20):
     # get initial stats
     state = kenlm.State()
     model.BeginSentenceWrite(state)
     current_beams = [(0.0, state, [])]
-
     for candidates in candidates_list:
-        valid_candidates = set()
-        for w in candidates:
-            if w and w.strip():
-                valid_candidates.add(w.upper())
-        
-        if not valid_candidates:
-            valid_candidates = {"<unk>"}
+        candidates = pheno_check(candidates)
+
+        if not candidates:
+            candidates = {""} 
         
         next_beams = []
-        
         for score, prev_state, history in current_beams:
             for word in candidates:
+                
                 new_state = kenlm.State()
-                word_score = model.BaseScore(prev_state, word, new_state)
+                word_score = model.BaseScore(prev_state, word.upper(), new_state)
                 
                 new_total_score = score + word_score
                 new_history = history + [word]
@@ -451,13 +457,12 @@ def get_best_sentence_beam_search(candidates_list, model, beam_width=10):
         
         next_beams.sort(key=lambda x: x[0], reverse=True)
         current_beams = next_beams[:beam_width]
-
+    
     if not current_beams:
         return None
         
     best_score, _, best_words = current_beams[0]
-    return " ".join(best_words).strip() # joint sentence and remove space 
-
+    return " ".join(best_words).strip()
 
 
 # prediction step
@@ -484,16 +489,16 @@ def pred_step(inp, batch_size):
 
 
 def prediction_to_sentence(preds, vocab, inv):
-    phonemes_idx = final_preds.numpy()
+    phonemes_idx = preds.numpy()
     phonemes = vocab[phonemes_idx]
     inv_keys = [phoneme_seq_to_inv_key(row) for row in phonemes]
     all_candidates = [sentence_to_words_candidates(s, inv) for s in inv_keys]
 
     all_best_sentences = []
     for i, candidates_list in enumerate(all_candidates):
-
         best_sentence = get_best_sentence_beam_search(candidates_list, model, beam_width=20)
-        all_best_sentences.append(best_sentence.lower()) # conver to lower letter 
+        best_sentence = best_sentence.lower()# conver to lower letter 
+        all_best_sentences.append(best_sentence) 
     return all_best_sentences
 
 
