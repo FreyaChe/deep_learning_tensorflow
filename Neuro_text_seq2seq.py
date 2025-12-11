@@ -361,7 +361,6 @@ for epoch in range(EPOCHS):
 test_file_dir = glob.glob(os.path.join(root_dir, "**", "*_test.hdf5"), recursive=True)
 test_dataset = generate_dataset(valid_file_dir, batch_size, training=False)
 
-from pyctcdecode import build_ctcdecoder
 import numpy as np
 import re
 from nltk.corpus import cmudict
@@ -515,3 +514,4 @@ with open(filename, 'w', newline='', encoding='utf-8') as f:
     
     for i, sentence in enumerate(output):
         writer.writerow([i, sentence])
+
