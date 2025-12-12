@@ -468,7 +468,7 @@ def get_best_sentence_beam_search(candidates_list, model, beam_width=20):
 # prediction step
 @tf.function
 def pred_step(inp, batch_size):
-    pred_array = tf.TensorArray(tf.int64, size=targ.shape[1]-1)
+    pred_array = tf.TensorArray(tf.int64, size=inp.shape[1]-1)
 
     # encoder
     enc_output, enc_states, mask = encoder(inp, training=False)
@@ -504,7 +504,7 @@ def prediction_to_sentence(preds, vocab, inv):
 
 # runing loop
 output = []
-for batch, (inp, targ) in enumerate(pred_step):
+for batch, (inp, targ) in enumerate(test_dataset):
     final_preds = pred_step(inp, batch_size)
     best_sentence = prediction_to_sentence(final_preds, vocab, inv)
     output.extend(best_sentence)
