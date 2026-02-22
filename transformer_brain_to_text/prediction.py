@@ -9,7 +9,6 @@ Created on Mon Jan 12 10:35:52 2026
 
 import re
 import kenlm
-import csv
 import numpy as np
 import tensorflow as tf
 from dataset import get_dataset
@@ -17,10 +16,11 @@ from nltk.corpus import cmudict
 from collections import defaultdict
 from config import batch_size, gram_path, csv_path, weight_path, cfg_model
 from transformer_model import generate_transformer
+import pandas as pd
 
 
 # pheno to text model
-text_model = kenlm.Model(gram_path) 
+text_model = kenlm.Model(str(gram_path)) 
 
 # vocab list 
 LOGIT_TO_PHONEME = [
@@ -83,7 +83,7 @@ def pheno_check(pheno):
 
 
 # get the best sentence candidate
-def get_best_sentence_beam_search(candidates_list, text_model, beam_width=20):
+def get_best_sentence_beam_search(candidates_list, text_model, beam_width=150):
     # get initial stats
     state = kenlm.State()
     text_model.BeginSentenceWrite(state)
@@ -132,95 +132,170 @@ def prediction_to_sentence(preds, vocab, inv):
     return all_best_sentences
 
 
-def beam_search_decode_top2(model, X, max_len=150,
-                            start_token=41, end_token=42, beam_width=2):
-
-    batch_size = tf.shape(X)[0]
-    enc_output, enc_mask = model.encoder(X)
+def beam_search_decode(model, X, max_len=150, start_token=41, end_token=42,
+                       beam_width=4, length_penalty=0.7):
+    """
+    Beam search decoding for transformer model.
     
-    # beams[i] = list of (sequence, cumulative_score)
-    # initial beams 
+    Args:
+        model: Transformer model
+        X: encoder input, shape (batch_size, seq_len, channels)
+        max_len: maximum output sequence length
+        start_token: start token id (41)
+        end_token: end token id (42)
+        beam_width: number of beams (recommended 4~8)
+        length_penalty: length normalization exponent (0.6~0.8)
+    
+    Returns:
+        best_sequences: shape (batch_size, seq_len)
+    """
+    batch_size = tf.shape(X)[0].numpy()
+    enc_output, enc_mask = model.encoder(X, training=False)
+
+    # beams[batch_idx] = list of (sequence, cumulative_log_prob)
+    # sequence shape: (1, current_len)
     beams = []
     for b in range(batch_size):
-        initial_seq = tf.fill([1, 1], start_token)
-        beams.append([(initial_seq, 0.0)]) # beams includes: sequence(inital=start_token), start score(initial=0)
-        
-    
+        initial_seq = tf.fill([1, 1], tf.cast(start_token, tf.int64))
+        beams.append([(initial_seq, 0.0)])
+
     for step in range(max_len - 1):
         new_beams = [[] for _ in range(batch_size)]
-        
-        for batch_idx in range(batch_size): # calculates 
+
+        for batch_idx in range(batch_size):
             for seq, cum_score in beams[batch_idx]:
+                
+                # if last token is end_token, keep beam as-is
                 if seq.shape[1] > 1 and seq[0, -1].numpy() == end_token:
                     new_beams[batch_idx].append((seq, cum_score))
                     continue
-                
-                dec_output, _ = model.decoder(seq, enc_output[batch_idx:batch_idx+1], enc_mask[batch_idx:batch_idx+1])
+
+                # decoder forward pass
+                dec_output, _ = model.decoder(
+                    seq,
+                    enc_output[batch_idx:batch_idx + 1],
+                    enc_mask[batch_idx:batch_idx + 1]
+                )
                 logits = model.final_layer(dec_output)
                 next_token_logits = logits[0, -1, :]  # (vocab_size,)
-                
-                top2_logits, top2_indices = tf.nn.top_k(next_token_logits, k=beam_width)
-                
+
+                # use log_softmax for numerically stable scores
+                log_probs = tf.nn.log_softmax(next_token_logits)
+                top_log_probs, top_indices = tf.nn.top_k(log_probs, k=beam_width)
+
                 for i in range(beam_width):
-                    next_token = top2_indices[i]
-                    token_score = top2_logits[i].numpy()
-                    
-                    new_seq = tf.concat([seq, tf.expand_dims(tf.expand_dims(next_token, 0), 0)], axis=1)
-                    new_score = cum_score + token_score
+                    next_token = tf.cast(top_indices[i], tf.int64)
+                    token_log_prob = top_log_probs[i].numpy()
+
+                    new_seq = tf.concat(
+                        [seq, tf.reshape(next_token, [1, 1])],
+                        axis=1
+                    )
+                    new_score = cum_score + token_log_prob
                     new_beams[batch_idx].append((new_seq, new_score))
-        
+
+        # keep top beam_width beams with length normalization
         for batch_idx in range(batch_size):
-            new_beams[batch_idx].sort(key=lambda x: x[1], reverse=True)
+            new_beams[batch_idx].sort(
+                key=lambda x: x[1] / (x[0].shape[1] ** length_penalty),
+                reverse=True
+            )
             beams[batch_idx] = new_beams[batch_idx][:beam_width]
-        
-        all_ended = True
-        for batch_idx in range(batch_size):
-            for seq, _ in beams[batch_idx]:
-                if seq[0, -1].numpy() != end_token:
-                    all_ended = False
-                    break
-            if not all_ended:
-                break
-        
+
+        # early stop if all beams ended
+        all_ended = all(
+            seq[0, -1].numpy() == end_token
+            for batch_idx in range(batch_size)
+            for seq, _ in beams[batch_idx]
+        )
         if all_ended:
             break
-    
+
+    # pick best beam per sample (highest length-normalized score)
     best_sequences = []
     for batch_idx in range(batch_size):
-        best_seq, _ = beams[batch_idx][0]
-        best_sequences.append(best_seq[0])
-    
+        best_seq, _ = max(
+            beams[batch_idx],
+            key=lambda x: x[1] / (x[0].shape[1] ** length_penalty)
+        )
+        best_sequences.append(best_seq[0])  # shape: (seq_len,)
+
+    # pad to same length
     max_seq_len = max(seq.shape[0] for seq in best_sequences)
-    padded_sequences = []
+    padded = []
     for seq in best_sequences:
-        if seq.shape[0] < max_seq_len:
-            padding = tf.fill([max_seq_len - seq.shape[0]], end_token)
+        pad_len = max_seq_len - seq.shape[0]
+        if pad_len > 0:
+            padding = tf.zeros([pad_len], dtype=tf.int64)
             seq = tf.concat([seq, padding], axis=0)
-        padded_sequences.append(seq)
-    
-    return tf.stack(padded_sequences, axis=0)
+        padded.append(seq)
+
+    return tf.stack(padded, axis=0)  # (batch_size, max_seq_len)
 
 
 
+# def greedy_decode(model, X, max_len=150,
+#                   start_token=41, end_token=42):
+#     """
+#     X: (batch_size, time_len, feature_dim)
+#     return: (batch_size, <= max_len)
+#     """
 
-test_dataset = get_dataset('test', batch_size)
+#     batch_size = tf.shape(X)[0]
+#     enc_output, enc_mask = model.encoder(X)
+#     decoder_input = tf.fill([batch_size, 1], start_token) 
+
+#     for _ in range(max_len - 1):
+#         dec_output, _ = model.decoder(decoder_input, enc_output, enc_mask)
+#         logits = model.final_layer(dec_output)
+        
+#         # next_token_logits = logits[:, -1, :]
+
+#         next_token = tf.argmax(logits, axis=-1, output_type=tf.int32)
+#         # next_token = tf.expand_dims(next_token, axis=1)
+
+#         decoder_input = tf.concat([decoder_input, next_token], axis=1)
+
+#         if tf.reduce_all(tf.equal(next_token, end_token)):
+#             break
+#     return decoder_input
+
+
+
+# test_dataset = get_dataset('test', batch_size)
+# transformer = generate_transformer(cfg_model, weight_path)
+
+# # runing loop
+# output = []
+# for batch, (inp, targ) in enumerate(test_dataset.take(1)):
+#     X, targ = inp
+#     final_preds = beam_search_decode_top2(transformer, X)
+#     best_sentence = prediction_to_sentence(final_preds, vocab, inv)
+#     output.extend(best_sentence)
+
+
+valid_dataset = get_dataset('valid', batch_size)
 transformer = generate_transformer(cfg_model, weight_path)
 
-# runing loop
+
 output = []
-for batch, (inp, targ) in enumerate(test_dataset):
-    # for batch, (inp, targ) in enumerate(train_dataset):
+y_real = []
+# runing loop
+for batch, (inp, y) in enumerate(valid_dataset):
     X, targ = inp
-    final_preds = beam_search_decode_top2(transformer, X)
+    final_preds = beam_search_decode(transformer, X, beam_width=4)
     best_sentence = prediction_to_sentence(final_preds, vocab, inv)
     output.extend(best_sentence)
+    
+    orig_sentence = prediction_to_sentence(y, vocab, inv)
+    y_real.extend(orig_sentence)
 
 
 # save to csv file
-with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-    writer = csv.writer(f)
-    writer.writerow(['id', 'text'])
-    
-    for i, sentence in enumerate(output):
-        writer.writerow([i, sentence])
+df = pd.DataFrame({
+    "real_sentence": y_real,
+    "prediction": output
+})
+
+df.to_csv(csv_path, index=False)
 
