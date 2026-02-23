@@ -12,8 +12,8 @@ from types import SimpleNamespace
 base_dir = Path(__file__).resolve().parent
 data_dir = base_dir.parent / 'brain-to-text-25/t15_copyTask_neuralData/hdf5_data_final/'
 freq_count_path = base_dir.parent / 'token_freq_counts.npy'
-weight_path = base_dir / 'train/transformer_noise_L3_latest.weights.h5'
-latest_weight_path = base_dir / 'train/transformer_noise_L3_latest_26.weights.h5'
+weight_path = base_dir / 'train/L2_acc_005_freq_04.weights.h5'
+latest_weight_path = base_dir / 'train/transformer_noise_L3_latest.weights.h5'
 gram_path = base_dir.parent.parent / '3-gram.arpa'
 csv_path = base_dir /'submission.csv'
 
@@ -34,9 +34,12 @@ cfg_data = SimpleNamespace(
 cfg_model = SimpleNamespace()
 cfg_model = SimpleNamespace(
     num_layers=2, 
-    time_dim=64, 
-    data_dim=192,
-    higher_kernel=60,
+    con1_dim=40, 
+    conhig_dim=80,
+    conmid_dim=64,
+    conlow_dim=64,
+    data_dim=248,
+    higher_kernel=36,
     lower_kernel=6,
     enco_key_dim=128, 
     num_heads=4, 
@@ -49,6 +52,7 @@ cfg_model = SimpleNamespace(
     dropout_rate=0.1, 
     att_penalty_score=0.05
     )
+
 
 
 '''
@@ -69,6 +73,6 @@ cfg_train = SimpleNamespace(
     epochs = 300,
     early_stop_patience = 10,
     early_stop_start_epoch = 25, 
-    freq_penalty_coef = 0.3 #0 means no penalty
+    freq_penalty_coef = 0.4 #0 means no penalty
     )
 

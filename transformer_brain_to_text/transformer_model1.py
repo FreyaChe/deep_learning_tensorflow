@@ -128,52 +128,62 @@ def positional_encoding(length, depth):
 
 
 class Encodeinput(tf.keras.layers.Layer): # for ieeg data 
-    def __init__(self, *, time_dim, data_dim, higher_kernel, lower_kernel, dropout_rate=0.1):
+    def __init__(self, *, con1_dim, conhig_dim, conmid_dim, conlow_dim, data_dim,
+                 higher_kernel, lower_kernel, dropout_rate=0.1):
         super(Encodeinput, self).__init__()
         # conv1D
         self.con_1 = tf.keras.Sequential([
-            tf.keras.layers.Conv1D(filters=time_dim, kernel_size=1, 
-                                                     strides=1, padding='same'),
+            tf.keras.layers.Conv1D(filters=con1_dim, kernel_size=2, 
+                                                     strides=2, padding='same'),
             tf.keras.layers.LayerNormalization(),
             tf.keras.layers.ReLU()
             ])
         
         self.con_high = tf.keras.Sequential([
-            tf.keras.layers.Conv1D(filters=time_dim, kernel_size=higher_kernel, 
+            tf.keras.layers.Conv1D(filters=conhig_dim, kernel_size=higher_kernel, 
                                                      strides=1, padding='same'),
             tf.keras.layers.LayerNormalization(),
             tf.keras.layers.ReLU(),
-            tf.keras.layers.MaxPool1D(pool_size=2, strides=1, padding='same'), 
-            tf.keras.layers.Dropout(rate=dropout_rate)
+            tf.keras.layers.MaxPool1D(pool_size=2, strides=2, padding='same')    
+            ])
+        
+        self.con_mid = tf.keras.Sequential([
+            tf.keras.layers.Conv1D(filters=conmid_dim, kernel_size=higher_kernel//3, 
+                                                     strides=1, padding='same'),
+            tf.keras.layers.LayerNormalization(),
+            tf.keras.layers.ReLU(),
+            tf.keras.layers.MaxPool1D(pool_size=2, strides=2, padding='same')    
             ])
         
         self.con_low = tf.keras.Sequential([
-            tf.keras.layers.Conv1D(filters=time_dim, kernel_size=lower_kernel, 
+            tf.keras.layers.Conv1D(filters=conlow_dim, kernel_size=lower_kernel, 
                                                      strides=1, padding='same'),
             tf.keras.layers.LayerNormalization(),
             tf.keras.layers.ReLU(),
-            tf.keras.layers.MaxPool1D(pool_size=2, strides=1, padding='same'), 
-            tf.keras.layers.Dropout(rate=dropout_rate)
+            tf.keras.layers.MaxPool1D(pool_size=2, strides=2, padding='same')
             ])
         
-        self.mask_convert = tf.keras.layers.MaxPool1D(pool_size=higher_kernel, strides=1, padding='same')
+        self.data_dim = data_dim
+        self.mask_convert = tf.keras.layers.MaxPool1D(pool_size=higher_kernel, strides=2, padding='same')
         self.layer_norm = tf.keras.layers.LayerNormalization()
         self.layer_norm2 = tf.keras.layers.LayerNormalization()
-        self.proj = tf.keras.layers.Dense(data_dim, activation='relu')
+        self.proj = tf.keras.layers.Dense(self.data_dim, activation='relu')
+        self.dropout = tf.keras.layers.Dropout(dropout_rate)
         
-        self.data_dim = data_dim
-        self.pos_encoding = positional_encoding(length=cfg_data.max_ieeg_len, depth=data_dim) # length: based on the strides
+        self.pos_encoding = positional_encoding(length=cfg_data.max_ieeg_len, depth=self.data_dim) # length: based on the strides
         self.pos_scale = tf.Variable(0.1, trainable=True, dtype=tf.float32)
         
     def call(self, x):        
         mask = tf.math.reduce_any(tf.not_equal(x, 0.0), axis=-1)
         x_1 = self.con_1(x)
         x_high = self.con_high(x) # conv with different kernel lenth
+        x_mid = self.con_mid(x) 
         x_low = self.con_low(x) 
-        x = tf.concat([x_high, x_low, x_1], axis=-1) # concat two kernal result in one matrix [batch_size, EEG_length, time_dim*2]
+        x = tf.concat([x_high, x_mid, x_low, x_1], axis=-1) # concat two kernal result in one matrix [batch_size, EEG_length, time_dim*2]
         x = self.layer_norm(x)
         x = self.proj(x)        
         x = self.layer_norm2(x)
+        x = self.dropout(x)
         
         # convert mask based on the kernel size
         mask = tf.cast(mask, tf.float32)
@@ -217,18 +227,20 @@ class Encoder(tf.keras.layers.Layer):
     conv_dim: the dimention of conv1D output,
     num_heads: head of attention
   '''  
-  def __init__(self, *, num_layers, time_dim, data_dim, higher_kernel, lower_kernel,
-               key_dim, num_heads, dff, dropout_rate=0.1): 
+  def __init__(self, *, num_layers, con1_dim, conhig_dim, conmid_dim, conlow_dim, data_dim,
+               higher_kernel, lower_kernel, key_dim, num_heads, dff, dropout_rate=0.1): 
     super().__init__()
-
     self.num_layers = num_layers # number of encoder layer
 
     self.enc_input = Encodeinput(
-        time_dim=time_dim, 
+        con1_dim=con1_dim, 
+        conhig_dim=conhig_dim,
+        conmid_dim=conmid_dim,
+        conlow_dim=conlow_dim,
         data_dim=data_dim,
         higher_kernel=higher_kernel, 
         lower_kernel=lower_kernel, 
-        dropout_rate=0) 
+        dropout_rate=dropout_rate) 
 
     self.enc_layers = [
         EncoderLayer(key_dim=key_dim,
@@ -369,17 +381,20 @@ class Decoder(tf.keras.layers.Layer):
 
 # In[transformer]
 class Transformer(tf.keras.Model):
-    def __init__(self, *, batch_size, num_layers, time_dim, data_dim, higher_kernel, lower_kernel, 
-                 enco_key_dim, num_heads, enc_dff, dec_dim, dec_key_dim, vocab_size, sentence_len, 
+    def __init__(self, *, batch_size, num_layers, con1_dim, conhig_dim, conmid_dim, 
+                 conlow_dim, data_dim, higher_kernel, lower_kernel, enco_key_dim, 
+                 num_heads, enc_dff, dec_dim, dec_key_dim, vocab_size, sentence_len, 
                  dec_dff, dropout_rate=0.1, att_penalty_score=0.1):
         
       super().__init__()
-      self.encoder = Encoder(num_layers=num_layers, time_dim=time_dim, 
-                             data_dim=data_dim, higher_kernel=higher_kernel,
+      self.encoder = Encoder(num_layers=num_layers, con1_dim=con1_dim, 
+                             conhig_dim=conhig_dim, conmid_dim=conmid_dim,
+                             conlow_dim=conlow_dim, data_dim=data_dim, 
+                             higher_kernel=higher_kernel,
                              lower_kernel=lower_kernel, key_dim=enco_key_dim, 
                              num_heads=num_heads, dff=enc_dff,
                              dropout_rate=dropout_rate)
-             
+      
       self.decoder = Decoder(num_layers=num_layers, dec_dim=dec_dim, num_heads=num_heads, 
                              key_dim=dec_key_dim, vocab_size=vocab_size, sentence_len=sentence_len, 
                              dff=dec_dff, dropout_rate=dropout_rate)
@@ -434,7 +449,10 @@ def generate_transformer(cfg_model, weight_path,initial_epoch=0):
     # initialize
     transformer = Transformer(batch_size = batch_size,
                               num_layers=cfg_model.num_layers, 
-                              time_dim=cfg_model.time_dim, 
+                              con1_dim=cfg_model.con1_dim, 
+                              conhig_dim=cfg_model.conhig_dim,
+                              conmid_dim=cfg_model.conmid_dim,
+                              conlow_dim=cfg_model.conlow_dim,
                               data_dim=cfg_model.data_dim,
                               higher_kernel=cfg_model.higher_kernel,
                               lower_kernel=cfg_model.lower_kernel, 
@@ -449,7 +467,6 @@ def generate_transformer(cfg_model, weight_path,initial_epoch=0):
                               dropout_rate=cfg_model.dropout_rate, 
                               att_penalty_score=cfg_model.att_penalty_score)
     
-                           
     # reload model if the model exist
     if os.path.exists(weight_path):
         transformer.current_epoch.assign(initial_epoch)
